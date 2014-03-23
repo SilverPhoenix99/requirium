@@ -1,6 +1,8 @@
 require 'thread'
 require 'pathname'
 require 'facets/string/snakecase'
+require 'facets/module/home'
+require 'facets/module/ancestor'
 
 #Automatically calls <code>Kernel#load</code> or <code>Kernel#require</code> on first use.
 #Example usage:
@@ -23,7 +25,7 @@ require 'facets/string/snakecase'
 #      autorequire_relative X: nil, Y: ['y', 'y1', 'y2']
 #    end
 module Requirium
-  VERSION = '0.0.1'.freeze
+  VERSION = '0.0.2'.freeze
 
   EXTENSIONS = "{#{Gem.suffixes.join(',')}}".freeze
 
@@ -54,8 +56,9 @@ module Requirium
           $stderr.puts e
         rescue => e
           $stderr.puts e
+        ensure
+          cond.ready!
         end
-        cond.ready!
       end
   end
 
@@ -98,7 +101,7 @@ module Requirium
 
   def common_auto(method, args, dirname = nil)
     if args.length == 1 && args.first.is_a?(Hash)
-      args.each { |sym, paths| add_load_item method, sym, paths, dirname }
+      args.first.each { |sym, paths| add_load_item method, sym, paths, dirname }
       return
     end
 
@@ -117,12 +120,18 @@ module Requirium
   def internal_load(sym)
     return if const_defined?(sym)
     method, paths, dirname = load_list { |l| l[sym.to_s] }
-    return unless method
+
+    unless method
+      return if self == Object # I'm the root and I don't have a definition => stop
+      mod = housing.select { |mod| mod != self && mod.ancestor?(Requirium) }.first # jump to the parent that extends Reqruirium
+      return mod ? mod.send(:internal_load, sym) : nil # if a parent was found, have him load, otherwise stop
+    end
+
+    raise NoMethodError, "invalid method type: #{method.inspect}" unless [:load, :require].include?(method)
     paths = [sym.to_s.snakecase] if paths.empty?
     paths = paths.map { |path| (Pathname(dirname) + path).to_s } if dirname
     paths.each do |filename|
       #puts "#{method} #{sym.inspect}, #{filename.inspect}"
-      raise NoMethodError, "invalid method type: #{method.inspect}" unless [:load, :require].include?(method)
       send(method, filename)
     end
     load_list { |l| l.delete(sym.to_s) } if const_defined?(sym)

@@ -27,8 +27,6 @@ require 'facets/module/ancestor'
 module Requirium
   VERSION = '0.0.2'.freeze
 
-  EXTENSIONS = "{#{Gem.suffixes.join(',')}}".freeze
-
   class CondVar < ConditionVariable
     def mutex
       @mutex ||= Mutex.new
@@ -109,27 +107,46 @@ module Requirium
     add_load_item method, sym, paths, dirname
   end
 
-  def add_load_item(method, sym, paths, dirname = nil)
+  def add_load_item(method, sym, paths, dirname)
     return if const_defined?(sym)
-    paths = [*paths]
+
+    paths = clean_paths(method, sym, paths, dirname)
+
     #puts "auto#{method}#{dirname ? '_relative' : ''} #{sym.inspect}, #{paths.map(&:inspect).join(', ')}"
-    load_list { |l| l[sym.to_s] = [method, paths, dirname] }
+    load_list { |l| l[sym.to_s] = [method, paths] }
     nil
+  end
+
+  def clean_paths(method, sym, paths, dirname)
+    paths = [*paths]
+    paths = [sym.to_s.snakecase] if paths.empty?
+
+    if dirname
+      dirname = Pathname(dirname)
+      paths.map! { |path| (dirname + path).to_s }
+    end
+
+    # append possible suffix
+    paths.map! { |p| Dir[*Gem.suffixes.map { |e| p + e }].first }.compact! if method == :load
+
+    paths
   end
 
   def internal_load(sym)
     return if const_defined?(sym)
-    method, paths, dirname = load_list { |l| l[sym.to_s] }
+    method, paths = load_list { |l| l[sym.to_s] }
 
     unless method
       return if self == Object # I'm the root and I don't have a definition => stop
-      mod = housing.select { |mod| mod != self && mod.ancestor?(Requirium) }.first # jump to the parent that extends Reqruirium
+
+      # jump to the parent that extends Requirium
+      mod = housing.select { |mod| mod != self && mod.singleton_class.included_modules.include?(Requirium) }.first
+
       return mod ? mod.send(:internal_load, sym) : nil # if a parent was found, have him load, otherwise stop
     end
 
     raise NoMethodError, "invalid method type: #{method.inspect}" unless [:load, :require].include?(method)
-    paths = [sym.to_s.snakecase] if paths.empty?
-    paths = paths.map { |path| (Pathname(dirname) + path).to_s } if dirname
+
     paths.each do |filename|
       #puts "#{method} #{sym.inspect}, #{filename.inspect}"
       send(method, filename)

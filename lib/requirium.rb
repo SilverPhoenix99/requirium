@@ -4,6 +4,11 @@ require 'facets/string/snakecase'
 require 'facets/module/home'
 require 'facets/module/ancestor'
 
+require_relative 'version'
+require_relative 'const_info'
+require_relative 'require_loader'
+require_relative 'load_loader'
+
 #Automatically calls <code>Kernel#load</code> or <code>Kernel#require</code> on first use.
 #Example usage:
 #
@@ -25,33 +30,6 @@ require 'facets/module/ancestor'
 #      autorequire_relative X: nil, Y: ['y', 'y1', 'y2']
 #    end
 module Requirium
-  VERSION = '0.0.2'.freeze
-
-  class Info
-    attr_accessor :sym
-    attr_accessor :mod
-    attr_reader :cond, :mutex
-
-    def initialize(mod, sym)
-      @mod, @sym, @cond, @mutex = mod, sym, ConditionVariable.new, Mutex.new
-    end
-
-    def internal_load
-      self.sym = mod.send(:internal_load, sym)
-    end
-
-    def ready!
-      @ready = true
-      mutex.synchronize { cond.signal }
-      nil
-    end
-
-    def wait_ready
-      mutex.synchronize { until @ready; cond.wait(mutex) end }
-      nil
-    end
-  end
-
   @queue = Queue.new
   @loader_thread = Thread.new do
       loop do
@@ -72,20 +50,20 @@ module Requirium
     attr_reader :loader_thread, :queue
   end
 
-  def autoload(*args) #TODO sync const_defined? ?
-    common_auto :load, args
+  def autoload(*args)
+    add_loader LoadLoader, args
   end
 
-  def autoload_relative(*args) #TODO sync const_defined? ?
-    common_auto :load, args, File.dirname(caller(1, 1)[0][/^(.+):\d+:in `.+'$/, 1])
+  def autoload_relative(*args)
+    add_loader LoadLoader, args, File.dirname(caller(1, 1)[0][/^(.+):\d+:in `.+'$/, 1])
   end
 
-  def autorequire(*args) #TODO sync const_defined? ?
-    common_auto :require, args
+  def autorequire(*args)
+    add_loader RequireLoader, args
   end
 
-  def autorequire_relative(*args) #TODO sync const_defined? ?
-    common_auto :require, args, File.dirname(caller(1, 1)[0][/^(.+):\d+:in `.+'$/, 1])
+  def autorequire_relative(*args)
+    add_loader RequireLoader, args, File.dirname(caller(1, 1)[0][/^(.+):\d+:in `.+'$/, 1])
   end
 
   #def const_defined?(*args)
@@ -95,61 +73,27 @@ module Requirium
   def const_missing(sym)
     return internal_load(sym) if Thread.current == Requirium.loader_thread
 
-    Requirium.queue.push(info = Info.new(self, sym))
+    Requirium.queue.push(info = ConstInfo.new(self, sym))
     info.wait_ready
-    const_defined?(sym) ? info.sym : super
+    const_defined?(sym) ? const_get(sym) : super
   end
 
   private
 
-  def common_auto(method, args, dirname = nil)
-    if args.length == 1 && args.first.is_a?(Hash)
-      args.first.each { |sym, paths| add_load_item method, sym, paths, dirname }
-      return
+  def add_loader(method, args, dirname = nil)
+    with_args(args) do |sym, paths|
+      load_list { |l| l[sym.to_s] = method.new(sym, paths, dirname) }
     end
-
-    sym, paths = args
-    add_load_item method, sym, paths, dirname
-  end
-
-  def add_load_item(method, sym, paths, dirname)
-    return if const_defined?(sym)
-
-    paths = clean_paths(method, sym, paths, dirname)
-
-    #puts "auto#{method}#{dirname ? '_relative' : ''} #{sym.inspect}, #{paths.map(&:inspect).join(', ')}"
-    load_list { |l| l[sym.to_s] = [method, paths] }
-    nil
-  end
-
-  def clean_paths(method, sym, paths, dirname)
-    paths = [*paths]
-    paths = [sym.to_s.snakecase] if paths.empty?
-
-    if dirname
-      dirname = Pathname(dirname)
-      paths.map! { |path| (dirname + path).to_s }
-    end
-
-    # append possible suffix
-    paths.map! { |p| Dir[*Gem.suffixes.map { |e| p + e }].first }.compact! if method == :load
-
-    paths
   end
 
   def internal_load(sym)
     return const_get(sym) if const_defined?(sym)
     str_sym = sym.to_s
-    has_sym, method, paths = load_list { |l| [l.has_key?(str_sym), *l[str_sym]] }
+    loader = load_list { |l| l[str_sym] }
 
-    return parent.const_missing(sym) unless has_sym # go to parent
+    return home.const_missing(sym) unless loader # go to parent
 
-    raise NoMethodError, "invalid method type: #{method.inspect}" unless [:load, :require].include?(method)
-
-    paths.each do |filename|
-      #puts "#{method} #{sym.inspect}, #{filename.inspect}"
-      send(method, filename)
-    end
+    loader.call(self)
 
     if const_defined?(sym)
       load_list { |l| l.delete(sym.to_s) }
@@ -163,7 +107,16 @@ module Requirium
     @mutex.synchronize { yield(@load_list) }
   end
 
-  def parent
-    name.split('::')[0..-2].inject(Object) { |mod, name| mod.const_get(name) }
+  def with_args(args)
+    if args.length == 1 && args.first.is_a?(Hash)
+      args.first.each do |sym, paths|
+        next if const_defined?(sym)
+        yield sym, paths
+      end
+    elsif !const_defined?(args.first)
+      yield args.first, args[1..-1]
+    end
+
+    nil
   end
 end

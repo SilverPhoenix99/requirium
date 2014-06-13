@@ -1,4 +1,4 @@
-require_relative 'lib/requirium'
+require_relative 'lib/version'
 
 Gem::Specification.new do |s|
   s.name          = 'requirium'

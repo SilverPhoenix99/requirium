@@ -27,19 +27,27 @@ require 'facets/module/ancestor'
 module Requirium
   VERSION = '0.0.2'.freeze
 
-  class CondVar < ConditionVariable
-    def mutex
-      @mutex ||= Mutex.new
+  class Info
+    attr_accessor :sym
+    attr_accessor :mod
+    attr_reader :cond, :mutex
+
+    def initialize(mod, sym)
+      @mod, @sym, @cond, @mutex = mod, sym, ConditionVariable.new, Mutex.new
+    end
+
+    def internal_load
+      self.sym = mod.send(:internal_load, sym)
     end
 
     def ready!
       @ready = true
-      mutex.synchronize { signal }
+      mutex.synchronize { cond.signal }
       nil
     end
 
     def wait_ready
-      mutex.synchronize { until @ready; wait(mutex) end }
+      mutex.synchronize { until @ready; cond.wait(mutex) end }
       nil
     end
   end
@@ -47,15 +55,15 @@ module Requirium
   @queue = Queue.new
   @loader_thread = Thread.new do
       loop do
-        mod, sym, cond = @queue.pop
+        info = @queue.pop
         begin
-          mod.send(:internal_load, sym)
+          info.internal_load
         rescue ScriptError => e
           $stderr.puts e
         rescue => e
           $stderr.puts e
         ensure
-          cond.ready!
+          info.ready!
         end
       end
   end
@@ -85,14 +93,11 @@ module Requirium
   #end
 
   def const_missing(sym)
-    if Thread.current == Requirium.loader_thread
-      internal_load(sym)
-    else
-      cond = CondVar.new
-      Requirium.queue.push [self, sym, cond]
-      cond.wait_ready
-    end
-    const_defined?(sym) ? const_get(sym) : super
+    return internal_load(sym) if Thread.current == Requirium.loader_thread
+
+    Requirium.queue.push(info = Info.new(self, sym))
+    info.wait_ready
+    const_defined?(sym) ? info.sym : super
   end
 
   private
@@ -133,17 +138,11 @@ module Requirium
   end
 
   def internal_load(sym)
-    return if const_defined?(sym)
-    method, paths = load_list { |l| l[sym.to_s] }
+    return const_get(sym) if const_defined?(sym)
+    str_sym = sym.to_s
+    has_sym, method, paths = load_list { |l| [l.has_key?(str_sym), *l[str_sym]] }
 
-    unless method
-      return if self == Object # I'm the root and I don't have a definition => stop
-
-      # jump to the parent that extends Requirium
-      mod = housing.select { |mod| mod != self && mod.singleton_class.included_modules.include?(Requirium) }.first
-
-      return mod ? mod.send(:internal_load, sym) : nil # if a parent was found, have him load, otherwise stop
-    end
+    return parent.const_missing(sym) unless has_sym # go to parent
 
     raise NoMethodError, "invalid method type: #{method.inspect}" unless [:load, :require].include?(method)
 
@@ -151,11 +150,20 @@ module Requirium
       #puts "#{method} #{sym.inspect}, #{filename.inspect}"
       send(method, filename)
     end
-    load_list { |l| l.delete(sym.to_s) } if const_defined?(sym)
-    nil
+
+    if const_defined?(sym)
+      load_list { |l| l.delete(sym.to_s) }
+      const_get(sym)
+    end
   end
 
   def load_list
-    (@mutex ||= Mutex.new).synchronize { yield(@load_list ||= {}) }
+    @mutex ||= Mutex.new
+    @load_list ||= {}
+    @mutex.synchronize { yield(@load_list) }
+  end
+
+  def parent
+    name.split('::')[0..-2].inject(Object) { |mod, name| mod.const_get(name) }
   end
 end

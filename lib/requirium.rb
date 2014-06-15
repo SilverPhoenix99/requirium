@@ -71,6 +71,12 @@ module Requirium
   #end
 
   def const_missing(sym)
+    if Thread.current == Requirium.loader_thread
+      # this avoids deadlocks. it uses the current loading to load the remaining dependencies
+      has, value = internal_load(sym)
+      return has ? value : super
+    end
+
     Requirium.queue.push(info = ConstInfo.new(self, sym))
     info.wait_ready
     raise info.error if info.error

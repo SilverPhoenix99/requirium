@@ -37,9 +37,9 @@ module Requirium
         begin
           info.internal_load
         rescue ScriptError => e
-          $stderr.puts e
+          info.error = e
         rescue => e
-          $stderr.puts e
+          info.error = e
         ensure
           info.ready!
         end
@@ -71,11 +71,10 @@ module Requirium
   #end
 
   def const_missing(sym)
-    return internal_load(sym) if Thread.current == Requirium.loader_thread
-
     Requirium.queue.push(info = ConstInfo.new(self, sym))
     info.wait_ready
-    const_defined?(sym) ? const_get(sym) : super
+    raise info.error if info.error
+    info.has_value? ? info.value : super
   end
 
   private
@@ -87,24 +86,27 @@ module Requirium
   end
 
   def internal_load(sym)
-    return const_get(sym) if const_defined?(sym)
-    str_sym = sym.to_s
-    loader = load_list { |l| l[str_sym] }
-
-    return home.const_missing(sym) unless loader # go to parent
-
-    loader.call(self)
-
-    if const_defined?(sym)
-      load_list { |l| l.delete(sym.to_s) }
-      const_get(sym)
+    lookup_list.find do |klass|
+      klass.send(:try_load, sym) if klass.singleton_class.include?(Requirium)
+      return [true, klass.const_get(sym)] if klass.const_defined?(sym)
     end
+
+    [false, nil]
   end
 
   def load_list
     @mutex ||= Mutex.new
     @load_list ||= {}
     @mutex.synchronize { yield(@load_list) }
+  end
+
+  def try_load(sym)
+    str_sym = sym.to_s
+    loader = load_list { |l| l[str_sym] }
+    return unless loader
+    loader.call(self)
+    load_list { |l| l.delete(sym.to_s) }
+    nil
   end
 
   def with_args(args)
@@ -119,4 +121,12 @@ module Requirium
 
     nil
   end
+
+  def lookup_list
+    list = name.split('::').reduce([Object]) { |a, n| a << a.last.const_get(n) }.reverse!
+    list.push(*ancestors)
+    list.uniq!
+    list
+  end
+
 end

@@ -1,19 +1,21 @@
 require_relative 'require_loader'
 
-class Requirium::LoadLoader < Requirium::RequireLoader
+module Requirium
+  class LoadLoader < RequireLoader
 
-  private
+    private
 
-  def clean_paths(paths, dirname)
-    paths = super
+    def clean_paths(paths, dirname)
+      paths = super
 
-    # append possible suffix
-    paths.map! { |p| Dir[*Gem.suffixes.map { |e| p + e }].first }.compact!
+      # append possible suffix
+      paths.map! { |p| Dir[*Gem.suffixes.map { |e| p + e }].first }.compact!
 
-    paths
-  end
+      paths
+    end
 
-  def method
-    :load
+    def method
+      :load
+    end
   end
 end

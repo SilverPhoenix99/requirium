@@ -1,3 +1,4 @@
+require 'continuation'
 require 'thread'
 require 'pathname'
 require 'facets/string/snakecase'
@@ -50,20 +51,12 @@ module Requirium
     attr_reader :loader_thread, :queue
   end
 
-  def autoload(*args)
-    add_loader LoadLoader, args
-  end
-
-  def autoload_relative(*args)
-    add_loader LoadLoader, args, File.dirname(caller(1, 1)[0][/^(.+):\d+:in `.+'$/, 1])
-  end
-
-  def autorequire(*args)
-    add_loader RequireLoader, args
-  end
-
-  def autorequire_relative(*args)
-    add_loader RequireLoader, args, File.dirname(caller(1, 1)[0][/^(.+):\d+:in `.+'$/, 1])
+  [:load, :require].each do |name|
+    type = const_get("#{name.capitalize}Loader")
+    define_method("auto#{name}", ->(*args) { add_loader type, args })
+    define_method("auto#{name}_relative", ->(*args) do
+      add_loader type, args, File.dirname(caller_locations(1, 1).first.path)
+    end)
   end
 
   #def const_defined?(*args)
@@ -71,13 +64,21 @@ module Requirium
   #end
 
   def const_missing(sym)
+    # if mri, use binding nesting
+    nesting = nil
+    if Requirium.mri?
+      return unless nesting = caller_nesting
+    end
+
+    info = ConstInfo.new(self, sym, nesting)
+
     if Thread.current == Requirium.loader_thread
       # this avoids deadlocks. it uses the current loading to load the remaining dependencies
-      has, value = internal_load(sym)
+      has, value = internal_load(info)
       return has ? value : super
     end
 
-    Requirium.queue.push(info = ConstInfo.new(self, sym))
+    Requirium.queue.push(info)
     info.wait_ready
     raise info.error if info.error
     info.has_value? ? info.value : super
@@ -85,16 +86,37 @@ module Requirium
 
   private
 
-  def add_loader(method, args, dirname = nil)
+  def add_loader(type, args, dirname = nil)
     with_args(args) do |sym, paths|
-      load_list { |l| l[sym.to_s] = method.new(sym, paths, dirname) }
+      load_list { |l| l[sym.to_s] = type.new(sym, paths, dirname) }
     end
   end
 
-  def internal_load(sym)
-    lookup_list.find do |klass|
-      klass.send(:try_load, sym) if klass.singleton_class.include?(Requirium)
-      return [true, klass.const_get(sym)] if klass.const_defined?(sym)
+  def caller_nesting
+    cc = nil
+    nst = nil
+    count = 0
+
+    t = Thread.current
+
+    set_trace_func(lambda do |event, _, _, _, binding, _|
+      if Thread.current == t
+        if count == 2
+          set_trace_func nil
+          cc.call(nst = eval('Module.nesting', binding))
+        elsif event == 'return'
+          count += 1
+        end
+      end
+    end)
+
+    callcc { |cont| cc = cont } && nst
+  end
+
+  def internal_load(info)
+    info.lookup_list.find do |klass|
+      klass.send(:try_load, info.sym) if klass.singleton_class.include?(Requirium)
+      return [true, klass.const_get(info.sym)] if klass.const_defined?(info.sym)
     end
 
     [false, nil]
@@ -128,11 +150,7 @@ module Requirium
     nil
   end
 
-  def lookup_list
-    list = name.split('::').reduce([Object]) { |a, n| a << a.last.const_get(n) }.reverse!
-    list.push(*ancestors)
-    list.uniq!
-    list
+  def self.mri?
+    (!defined?(RUBY_ENGINE) || RUBY_ENGINE == 'ruby') && RUBY_DESCRIPTION !~ /Enterprise/
   end
-
 end

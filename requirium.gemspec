@@ -17,7 +17,7 @@ Gem::Specification.new do |s|
   Thank you for choosing Requirium.
 
   ==========================================================================
-  If you find any bugs, please report them on
+  If you find any bugs, please report them at
     https://github.com/SilverPhoenix99/requirium/issues
 
 +----------------------------------------------------------------------------+
